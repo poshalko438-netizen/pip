@@ -1,263 +1,536 @@
-<!DOCTYPE html>
-<html lang="ru">
+<!doctype html>
+<html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Sanira — Hair + Parallax (Сильная анимация)</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
+  <title>Konva + Matter.js Hair Wind Scene</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <style>
     html, body {
       margin: 0;
+      padding: 0;
       height: 100%;
+      background: #000;
       overflow: hidden;
-      background: #000;
-      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-      color: #fff;
-    }
-    #app {
-      position: fixed;
-      inset: 0;
-      width: 100vw;
-      height: 100vh;
       touch-action: none;
-      background: #000;
+      -webkit-user-select: none;
+      user-select: none;
+      color: #fff;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
     }
-    #loader {
-      position: fixed; inset: 0; display: grid; place-items: center;
-      background: #000; z-index: 20; transition: opacity .4s ease;
+    #container {
+      width: 100%;
+      height: 100%;
     }
-    #loader.hidden { opacity: 0; pointer-events: none; }
+    #notice {
+      position: fixed; left: 8px; bottom: 8px; right: 8px;
+      background: rgba(0,0,0,0.5);
+      border: 1px solid rgba(255,255,255,0.15);
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 12px;
+      line-height: 1.4;
+      pointer-events: none;
+      z-index: 10;
+    }
   </style>
+  <!-- Konva v9 -->
+  <script src="https://cdn.jsdelivr.net/npm/konva@9/konva.min.js"></script>
+  <!-- Matter.js v0.19 -->
+  <script src="https://cdn.jsdelivr.net/npm/matter-js@0.19.0/build/matter.min.js"></script>
 </head>
 <body>
-  
-  <video id="baseVideo" preload="auto" playsinline muted loop style="display:none">
-    <source src="./The girl in the photo blinks smoothly..mp4" type="video/mp4" />
-  </video>
-  
-  <!-- Тег <audio> убран из HTML, чтобы избежать ошибок загрузки -->
+  <div id="container"></div>
+  <div id="notice">Move your mouse or tilt your phone to create wind. If some assets are missing, placeholders will be used.</div>
 
-  <div id="app"></div>
-  <div id="loader">Загрузка…</div>
+  <script>
+    // ---------------------------
+    // Helpers (no-throw fallbacks)
+    // ---------------------------
+    const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+    const lerp = (a, b, t) => a + (b - a) * t;
 
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
-
-  <script type="module">
-    import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
-    
-    
-    const app = document.getElementById('app');
-    const loaderEl = document.getElementById('loader');
-    const videoEl = document.getElementById('baseVideo');
-    
-    // ИЗМЕНЕНИЕ №1: Создаем аудио прямо в JS для надежности
-    const audioEl = new Audio('./judas.mp3');
-    audioEl.loop = true;
-
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-    app.appendChild(renderer.domElement);
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.75));
-    renderer.outputColorSpace = THREE.SRGBColorSpace;
-
-    const scene = new THREE.Scene();
-    let vw = window.innerWidth, vh = window.innerHeight;
-    const camera = new THREE.OrthographicCamera(-vw/2, vw/2, vh/2, -vh/2, -1000, 1000);
-    camera.position.set(0, 0, 10);
-
-    const root = new THREE.Group();
-    scene.add(root);
-
-    const LAYER = { BACK: -10, VIDEO: 0, HAIR: 10 };
-
-    function resizeRenderer() {
-      vw = window.innerWidth;
-      vh = window.innerHeight;
-      renderer.setSize(vw, vh, false);
-      camera.left = -vw/2;
-      camera.right = vw/2;
-      camera.top = vh/2;
-      camera.bottom = -vh/2;
-      camera.updateProjectionMatrix();
-      fitCover(backgroundMesh, bgTex.image ? bgTex.image.width : 1920, bgTex.image ? bgTex.image.height : 1080, -1);
-      fitCover(videoMesh, videoEl.videoWidth || 1920, videoEl.videoHeight || 1080, 1);
-      positionHair();
+    function loadFirstAvailableImage(paths) {
+      return new Promise((resolve) => {
+        let i = 0;
+        const tryNext = () => {
+          if (i >= paths.length) return resolve(null);
+          const src = paths[i++];
+          if (!src) return tryNext();
+          const img = new Image();
+          img.crossOrigin = 'anonymous';
+          img.onload = () => resolve({ image: img, src });
+          img.onerror = () => {
+            console.warn('Image failed:', src);
+            tryNext();
+          };
+          img.src = src;
+        };
+        tryNext();
+      });
     }
 
-    function fitCover(mesh, texW, texH, zIndex = 0) {
-      if (!mesh || !texW || !texH) return;
-      const viewW = vw;
-      const viewH = vh;
-      const viewAR = viewW / viewH;
-      const texAR = texW / texH;
-      let width, height;
-      if (texAR > viewAR) {
-        height = viewH;
-        width = height * texAR;
+    function loadFirstPlayableVideo(paths) {
+      return new Promise((resolve) => {
+        let i = 0;
+        const video = document.createElement('video');
+        video.muted = true;
+        video.loop = true;
+        video.playsInline = true;
+        video.autoplay = true;
+        video.crossOrigin = 'anonymous';
+
+        const cleanup = () => {
+          video.oncanplay = null;
+          video.onloadeddata = null;
+          video.onerror = null;
+        };
+
+        const tryNext = () => {
+          if (i >= paths.length) {
+            cleanup();
+            console.warn('No playable video found among:', paths);
+            return resolve(null);
+          }
+          const src = paths[i++];
+          if (!src) return tryNext();
+          cleanup();
+          video.src = src;
+          video.oncanplay = () => {
+            cleanup();
+            const p = video.play();
+            if (p && typeof p.then === 'function') p.catch(() => {});
+            resolve(video);
+          };
+          video.onloadeddata = () => {
+            // Safari sometimes fires loadeddata before canplay; accept it
+            cleanup();
+            const p = video.play();
+            if (p && typeof p.then === 'function') p.catch(() => {});
+            resolve(video);
+          };
+          video.onerror = () => {
+            console.warn('Video failed:', src);
+            tryNext();
+          };
+        };
+        tryNext();
+      });
+    }
+
+    (async function main() {
+      // ---------------------------
+      // Stage & Layers
+      // ---------------------------
+      const stage = new Konva.Stage({
+        container: 'container',
+        width: window.innerWidth,
+        height: window.innerHeight
+      });
+
+      // Centered pivot for camera effects
+      stage.offset({ x: stage.width() / 2, y: stage.height() / 2 });
+      stage.position({ x: stage.width() / 2, y: stage.height() / 2 });
+
+      const backgroundLayer = new Konva.Layer({ listening: false });
+      const videoLayer = new Konva.Layer({ listening: false });
+      const hairLayer = new Konva.Layer({ listening: false });
+      stage.add(backgroundLayer);
+      stage.add(videoLayer);
+      stage.add(hairLayer);
+
+      // ---------------------------
+      // Load assets (with fallbacks)
+      // ---------------------------
+      const bgResult = await loadFirstAvailableImage([
+        'background.jpg',
+        'bg.jpg',
+        'bg.png'
+      ]);
+
+      const hairSourceSets = [
+        ['hair_01.png', 'hair1.png'],
+        ['hair_02.png', 'hair2.png'],
+        ['hair_03.png', 'hair3.png'],
+        ['hair_04.png', 'hair4.png', 'hair5.png']
+      ];
+
+      const hairResults = await Promise.all(
+        hairSourceSets.map(paths => loadFirstAvailableImage(paths))
+      );
+
+      const videoResult = await loadFirstPlayableVideo([
+        'sanira_base.mp4',
+        'The girl in the photo blinks smoothly..mp4',
+        'The girl in the photo blinks smoothly. (1).mp4',
+        'sanira_base.webm'
+      ]);
+
+      // ---------------------------
+      // Background setup (cover)
+      // ---------------------------
+      let bgNode = null;
+      if (bgResult && bgResult.image) {
+        bgNode = new Konva.Image({ image: bgResult.image, listening: false });
+        backgroundLayer.add(bgNode);
       } else {
-        width = viewW;
-        height = width / texAR;
-      }
-      mesh.scale.set(width, height, 1);
-      mesh.position.set(0, 0, zIndex);
-    }
-
-    function hideLoader() {
-      loaderEl.classList.add('hidden');
-      setTimeout(() => loaderEl.remove(), 500);
-
-      // Надежный способ запустить музыку
-      const playPromise = audioEl.play();
-      if (playPromise !== undefined) {
-        playPromise.catch(error => {
-          console.warn("Autoplay был заблокирован браузером. Музыка начнется после первого клика.");
+        // Fallback gradient rectangle
+        bgNode = new Konva.Rect({
+          listening: false,
+          fillLinearGradientStartPoint: { x: 0, y: 0 },
+          fillLinearGradientEndPoint: { x: stage.width(), y: stage.height() },
+          fillLinearGradientColorStops: [0, '#0b0b0b', 1, '#111']
         });
+        backgroundLayer.add(bgNode);
       }
 
-      function enableAudio() {
-        audioEl.play().catch(() => {});
-        window.removeEventListener('click', enableAudio);
-        window.removeEventListener('touchstart', enableAudio);
+      function layoutBackground() {
+        if (!bgNode) return;
+        bgNode.x(-stage.width() / 2);
+        bgNode.y(-stage.height() / 2);
+        bgNode.width(stage.width());
+        bgNode.height(stage.height());
       }
-      window.addEventListener('click', enableAudio);
-      window.addEventListener('touchstart', enableAudio);
-    }
 
-    const texLoader = new THREE.TextureLoader();
-    const bgTex = texLoader.load('bg.png', () => {
-      bgTex.colorSpace = THREE.SRGBColorSpace;
-      resizeRenderer();
-    });
+      layoutBackground();
+      backgroundLayer.draw();
 
-    const bgMat = new THREE.MeshBasicMaterial({ map: bgTex, depthTest: false, depthWrite: false });
-    const unitPlane = new THREE.PlaneGeometry(1,1);
-    const backgroundMesh = new THREE.Mesh(unitPlane, bgMat);
-    backgroundMesh.renderOrder = 0;
-    root.add(backgroundMesh);
-
-    videoEl.muted = true;
-    videoEl.setAttribute('muted', '');
-    videoEl.setAttribute('playsinline', '');
-    videoEl.play().catch(() => {
-      const playOnce = () => videoEl.play().catch(()=>{});
-      window.addEventListener('pointerdown', playOnce, { once: true, passive: true });
-    });
-
-    const videoTex = new THREE.VideoTexture(videoEl);
-    videoTex.colorSpace = THREE.SRGBColorSpace;
-    const videoMat = new THREE.MeshBasicMaterial({ map: videoTex, transparent: false, depthTest: false, depthWrite: false });
-    const videoMesh = new THREE.Mesh(unitPlane, videoMat);
-    videoMesh.renderOrder = 1;
-    root.add(videoMesh);
-
-    const HAIR_SOURCES = [
-      { file: 'hair1.png', anchor: { x: 0.03, y: 0.03 } },
-      { file: 'hair2.png', anchor: { x:  0.02, y: 0.03 } },
-      { file: 'hair3.png', anchor: { x: 0.01, y: 0.03 } },
-      { file: 'hair4.png', anchor: { x:  0, y: 0.03 } },
-      { file: 'hair5.png', anchor: { x:  0, y: 0.04 } },
-    ];
-    const hairGroup = new THREE.Group();
-    hairGroup.renderOrder = 2;
-    root.add(hairGroup);
-    const hairs = [];
-
-    HAIR_SOURCES.forEach(({ file, anchor }, i) => {
-      const tex = texLoader.load(file, positionHair);
-      tex.colorSpace = THREE.SRGBColorSpace;
-      const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthTest: false, depthWrite: false });
-      const mesh = new THREE.Mesh(unitPlane, mat);
-      mesh.userData = { anchor, base: new THREE.Vector3() };
-      hairGroup.add(mesh);
-      hairs.push(mesh);
-      mesh.renderOrder = 3 + i;
-    });
-
-    // Плавная анимация волос с эффектом волны
-    function animateHairWind() {
-      function updateHairWave() {
-        const t = performance.now() / 1000;
-        hairs.forEach((mesh, i) => {
-          // Волна по X и Y, сдвиг фазы для каждой пряди
-          const waveX = Math.sin(t * 0.9 + i * 0.7) * 10 + Math.sin(t * 2.2 + i) * 2;
-          const waveY = Math.cos(t * 1.1 + i * 0.5) * 7 + Math.sin(t * 1.7 + i * 1.3) * 1.5;
-          mesh.position.x = mesh.userData.base.x + waveX;
-          mesh.position.y = mesh.userData.base.y + waveY;
-          // Плавное покачивание
-          mesh.rotation.z = Math.sin(t * 1.2 + i) * 0.07 + Math.sin(t * 2.5 + i * 0.8) * 0.025;
+      // ---------------------------
+      // Video via Konva.Image
+      // ---------------------------
+      let videoKonva = null;
+      if (videoResult) {
+        videoKonva = new Konva.Image({ image: videoResult, listening: false });
+        videoLayer.add(videoKonva);
+      } else {
+        // Placeholder if no video
+        const placeholder = new Konva.Text({
+          text: 'Video missing',
+          fontSize: 18,
+          fill: '#bbb',
+          align: 'center'
         });
-        requestAnimationFrame(updateHairWave);
+        videoLayer.add(placeholder);
       }
-      updateHairWave();
-    }
 
-    function positionHair() {
-      const vW = videoMesh.scale.x;
-      const vH = videoMesh.scale.y;
-      hairs.forEach((mesh) => {
-        const tex = mesh.material.map;
-        if (!tex || !tex.image || !tex.image.width) return;
-        const imgW = tex.image.width;
-        const imgH = tex.image.height;
-        const scaleK = 0.4;
-        mesh.scale.set(imgW * scaleK, imgH * scaleK, 1);
-        const px = mesh.userData.anchor.x * vW;
-        const py = mesh.userData.anchor.y * vH;
-        mesh.position.set(px, py, LAYER.HAIR);
-        mesh.userData.base.set(px, py, LAYER.HAIR);
-      });
-    }
+      function layoutVideo() {
+        if (!videoKonva) return;
+        const vw = videoResult.videoWidth || 640;
+        const vh = videoResult.videoHeight || 360;
+        const targetH = stage.height() * 0.6;
+        const scale = targetH / vh;
+        const w = vw * scale;
+        const h = vh * scale;
+        videoKonva.width(w);
+        videoKonva.height(h);
+        videoKonva.x(-w / 2);
+        videoKonva.y(-h / 2);
+      }
 
-    gsap.to(camera, {
-      duration: 4.5, repeat: -1, yoyo: true, ease: "sine.inOut",
-      zoom: 1.04, onUpdate: () => camera.updateProjectionMatrix()
-    });
-    gsap.to(root.position, {
-      duration: 8, repeat: -1, yoyo: true, ease: "sine.inOut",
-      x: "+=8", y: "-=6"
-    });
-    
-    window.addEventListener('resize', resizeRenderer);
-
-
-
-    // =======================================================
-    // КОД ДЛЯ ПЛАВНОГО ДВИЖЕНИЯ СЦЕНЫ ЗА МЫШЬЮ (ПАРАЛЛАКС)
-    // =======================================================
-    function onPointerMove(e) {
-      // Получаем координаты курсора в формате от -1 до +1
-      const pointerX = (e.clientX / window.innerWidth) * 2 - 1;
-      const pointerY = -(e.clientY / window.innerHeight) * 2 + 1;
-      // Коэффициент силы движения. Можете сделать его больше (например, 25), если хотите, чтобы сцена двигалась сильнее.
-      const parallaxFactor = 35;
-      // Анимируем всю сцену (root - это группа, где лежат фон, видео и волосы)
-      // Она будет плавно двигаться в ПРОТИВОПОЛОЖНУЮ от курсора сторону, создавая эффект глубины.
-      gsap.to(root.position, {
-        x: -pointerX * parallaxFactor,
-        y: -pointerY * parallaxFactor,
-        duration: 1.2, // Длительность анимации, делает движение плавным
-        ease: "power2.out" // Тип анимации для плавного замедления
-      });
-    }
-    window.addEventListener('mousemove', onPointerMove);
-
-    function render() {
-      requestAnimationFrame(render);
-      camera.lookAt(0, 0, 0);
-      renderer.render(scene, camera);
-    }
-    render();
-
-    const readinessCheck = setInterval(() => {
-        const videoReady = videoEl.readyState >= 2;
-        const hairsReady = hairs.every(mesh => mesh.material.map && mesh.material.map.image);
-        if (videoReady && hairsReady && bgTex.image) {
-            resizeRenderer();
-            hideLoader();
-            animateHairWind();
-            clearInterval(readinessCheck);
+      if (videoResult) {
+        if (videoResult.readyState >= 2) {
+          layoutVideo();
+        } else {
+          videoResult.addEventListener('loadeddata', () => layoutVideo(), { once: true });
         }
-    }, 100);
+      }
+      videoLayer.draw();
 
-    resizeRenderer();
+      // ---------------------------
+      // Matter.js Physics (no gravity)
+      // ---------------------------
+      const { Engine, Bodies, Composite, Composites, Body } = Matter;
+      const engine = Engine.create();
+      engine.gravity.y = 0;
+      engine.gravity.x = 0;
+      engine.gravity.scale = 0;
+
+      // ---------------------------
+      // Hair bundles (5-point chains)
+      // ---------------------------
+      const HAIR_COUNT = 4;
+      const POINTS_PER_HAIR = 5;
+      const SEGMENT_LENGTH = 20;
+      const PARTICLE_RADIUS = 6;
+
+      const hairBundles = [];
+
+      function createHairBundle(index, startX, startY, hairImage) {
+        const stack = Composites.stack(
+          startX, startY,
+          POINTS_PER_HAIR, 1,
+          0, 0,
+          (x, y) => Bodies.circle(x, y, PARTICLE_RADIUS, {
+            frictionAir: 0.1,
+            restitution: 0.1,
+            inertia: Infinity
+          })
+        );
+
+        Composites.chain(stack, 0.5, 0, -0.5, 0, {
+          stiffness: 0.8,
+          length: SEGMENT_LENGTH,
+          damping: 0.02
+        });
+
+        const rootBody = stack.bodies[0];
+        Body.setStatic(rootBody, true);
+        Composite.add(engine.world, stack);
+
+        const tipBody = stack.bodies[stack.bodies.length - 1];
+        const baseLength = Math.hypot(
+          tipBody.position.x - rootBody.position.x,
+          tipBody.position.y - rootBody.position.y
+        );
+
+        const delayedTarget = { x: startX, y: startY };
+
+        const hairNode = new Konva.Shape({
+          listening: false,
+          sceneFunc: (ctx, shape) => {
+            const bodies = stack.bodies;
+            const b0 = bodies[0];
+            const bN = bodies[bodies.length - 1];
+            const root = b0.position;
+            const tip = bN.position;
+
+            const dx = tip.x - root.x;
+            const dy = tip.y - root.y;
+            const len = Math.max(1e-3, Math.hypot(dx, dy));
+            const ux = dx / len;
+            const uy = dy / len;
+
+            // Perpendicular vector
+            const px = -uy;
+            const py = ux;
+
+            // Weighted average lateral displacement
+            let sumLat = 0;
+            let wSum = 0;
+            for (let i = 1; i < bodies.length; i++) {
+              const p = bodies[i].position;
+              const rx = p.x - root.x;
+              const ry = p.y - root.y;
+              const lateral = rx * px + ry * py;
+              const w = i;
+              sumLat += lateral * w;
+              wSum += w;
+            }
+            const avgLat = wSum > 0 ? sumLat / wSum : 0;
+            const stretch = clamp(len / baseLength, 0.85, 1.15);
+
+            const imgW = hairImage && hairImage.width ? hairImage.width : 140;
+            const imgH = hairImage && hairImage.height ? hairImage.height : 240;
+
+            // Skew proportional to lateral displacement
+            const skewX = clamp((avgLat / imgH) * 0.8, -0.5, 0.5);
+            const skewY = clamp((avgLat / imgW) * 0.2, -0.25, 0.25);
+
+            // Subtle flutter
+            const t = performance.now() / 1000;
+            const noise = Math.sin(t * 1.7 + index * 0.6) * 0.03;
+            const angle = Math.atan2(dy, dx) + noise * 0.2;
+
+            ctx.save();
+            ctx.translate(root.x, root.y);
+            ctx.rotate(angle + Math.PI / 2);
+            ctx.transform(1, skewY, skewX, stretch, 0, 0);
+
+            if (hairImage) {
+              ctx.drawImage(hairImage, -imgW / 2, 0, imgW, imgH);
+            } else {
+              // Placeholder strand
+              ctx.fillStyle = '#222';
+              ctx.strokeStyle = '#555';
+              ctx.lineWidth = 2;
+              ctx.beginPath();
+              ctx.moveTo(0, 0);
+              ctx.quadraticCurveTo(-20, imgH * 0.4, 0, imgH);
+              ctx.quadraticCurveTo(20, imgH * 0.6, 0, imgH);
+              ctx.stroke();
+            }
+
+            ctx.restore();
+          }
+        });
+
+        hairLayer.add(hairNode);
+
+        return { index, stack, hairNode, hairImage, baseLength, delayedTarget };
+      }
+
+      function createAllHair() {
+        hairBundles.length = 0;
+        const startBaseX = -200; // relative to stage center (0,0)
+        const startBaseY = -200;
+        for (let i = 0; i < HAIR_COUNT; i++) {
+          const startX = startBaseX + i * 100;
+          const startY = startBaseY;
+          const hairImg = hairResults[i] ? hairResults[i].image : null;
+          const bundle = createHairBundle(i, startX, startY, hairImg);
+          hairBundles.push(bundle);
+        }
+      }
+
+      createAllHair();
+
+      // ---------------------------
+      // Input: cursor/touch + device tilt for parallax
+      // ---------------------------
+      const input = {
+        pointer: { x: 0, y: 0 },
+        hasPointer: false,
+        tilt: { x: 0, y: 0 }
+      };
+
+      function stagePointerPosition() {
+        const p = stage.getPointerPosition();
+        if (p) {
+          const inv = stage.getAbsoluteTransform().copy().invert();
+          const world = inv.point(p);
+          input.pointer.x = world.x;
+          input.pointer.y = world.y;
+          input.hasPointer = true;
+        }
+      }
+
+      stage.on('mousemove touchmove', () => stagePointerPosition());
+      window.addEventListener('deviceorientation', (e) => {
+        const gamma = clamp(e.gamma || 0, -45, 45);
+        const beta = clamp(e.beta || 0, -45, 45);
+        input.tilt.x = gamma / 45;
+        input.tilt.y = beta / 45;
+      }, { passive: true });
+
+      // ---------------------------
+      // Resize handling
+      // ---------------------------
+      let prevCenter = { x: stage.width() / 2, y: stage.height() / 2 };
+      function handleResize() {
+        const w = window.innerWidth;
+        const h = window.innerHeight;
+        const newCenter = { x: w / 2, y: h / 2 };
+        const delta = { x: newCenter.x - prevCenter.x, y: newCenter.y - prevCenter.y };
+
+        stage.size({ width: w, height: h });
+        stage.offset({ x: newCenter.x, y: newCenter.y });
+
+        layoutBackground();
+        layoutVideo();
+
+        for (const hb of hairBundles) {
+          for (const b of hb.stack.bodies) {
+            Body.setPosition(b, { x: b.position.x + delta.x, y: b.position.y + delta.y });
+            Body.setVelocity(b, { x: 0, y: 0 });
+          }
+          hb.delayedTarget.x += delta.x;
+          hb.delayedTarget.y += delta.y;
+        }
+
+        prevCenter = newCenter;
+      }
+      window.addEventListener('resize', handleResize);
+
+      // ---------------------------
+      // Camera effects (breathing + parallax)
+      // ---------------------------
+      function applyCameraEffects(timeSec) {
+        const breatheScale = 1 + Math.sin(timeSec * 0.2) * 0.02;
+        const breatheX = Math.sin(timeSec * 0.3) * 5;
+        const breatheY = Math.cos(timeSec * 0.3) * 5;
+
+        const centerX = stage.width() / 2;
+        const centerY = stage.height() / 2;
+
+        const relX = input.hasPointer ? clamp((input.pointer.x - centerX) / centerX, -1, 1) : 0;
+        const relY = input.hasPointer ? clamp((input.pointer.y - centerY) / centerY, -1, 1) : 0;
+
+        const parallaxMax = 20;
+        const parallaxX = (relX + input.tilt.x * 0.5) * parallaxMax;
+        const parallaxY = (relY + input.tilt.y * 0.5) * parallaxMax;
+
+        stage.scale({ x: breatheScale, y: breatheScale });
+        stage.position({
+          x: centerX + breatheX + parallaxX,
+          y: centerY + breatheY + parallaxY
+        });
+      }
+
+      // ---------------------------
+      // Forces: idle wind + interactive wind
+      // ---------------------------
+      function applyForces(timeSec, dtSec) {
+        const idle = Math.sin(timeSec * 0.5) * 0.0005;
+
+        for (const hb of hairBundles) {
+          const bodies = hb.stack.bodies;
+
+          const lagSec = 0.1 * hb.index + 0.1;
+          const alpha = 1 - Math.exp(-dtSec / lagSec);
+          hb.delayedTarget.x = lerp(hb.delayedTarget.x, input.pointer.x, alpha);
+          hb.delayedTarget.y = lerp(hb.delayedTarget.y, input.pointer.y, alpha);
+
+          const root = bodies[0];
+          const dx = hb.delayedTarget.x - root.position.x;
+          const dy = hb.delayedTarget.y - root.position.y;
+          const dist = Math.hypot(dx, dy);
+          const dir = dist > 1e-3 ? { x: dx / dist, y: dy / dist } : { x: 0, y: 0 };
+          const strength = 0.001 / (dist + 0.1);
+
+          for (let i = 1; i < bodies.length; i++) {
+            const b = bodies[i];
+            Body.applyForce(b, b.position, { x: idle, y: 0 });
+            const tipWeight = i / (bodies.length - 1);
+            const f = strength * tipWeight;
+            Body.applyForce(b, b.position, { x: dir.x * f, y: dir.y * f });
+          }
+        }
+
+        Matter.Engine.update(engine, 16);
+      }
+
+      // ---------------------------
+      // Animation loop
+      // ---------------------------
+      let lastTimeMs = performance.now();
+      const animation = new Konva.Animation((frame) => {
+        const now = performance.now();
+        const dtSec = Math.min(0.05, (now - lastTimeMs) / 1000);
+        lastTimeMs = now;
+
+        const tSec = frame.time / 1000;
+
+        stagePointerPosition();
+        applyForces(tSec, dtSec);
+        applyCameraEffects(tSec);
+
+        backgroundLayer.batchDraw();
+        // hairLayer is automatically redrawn by Konva.Animation
+      }, hairLayer);
+
+      animation.start();
+
+      // Separate animation dedicated to video layer to ensure continuous frame updates
+      const videoAnim = new Konva.Animation(() => {
+        // no-op: Konva will redraw this layer each frame
+      }, videoLayer);
+      videoAnim.start();
+
+      // Initial draw & layout
+      handleResize();
+      backgroundLayer.draw();
+      videoLayer.draw();
+      hairLayer.draw();
+
+      // Keep trying to play video if paused by autoplay policy
+      if (videoResult) {
+        setInterval(() => {
+          if (videoResult.paused) {
+            const p = videoResult.play();
+            if (p && typeof p.then === 'function') p.catch(() => {});
+          }
+        }, 2000);
+      }
+    })();
   </script>
 </body>
 </html>
